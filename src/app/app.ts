@@ -1,18 +1,17 @@
 import { App } from "@microsoft/teams.apps";
-import { ChatPrompt } from "@microsoft/teams.ai";
-import { LocalStorage } from "@microsoft/teams.common";
-import { OpenAIChatModel } from "@microsoft/teams.openai";
 import { MessageActivity, TokenCredentials } from '@microsoft/teams.api';
 import { ManagedIdentityCredential } from '@azure/identity';
+import { LocalStorage } from "@microsoft/teams.common";
 import * as fs from 'fs';
 import * as path from 'path';
 import config from "../config";
 import { CardFactory } from "botbuilder";
 import { tools } from "../tools/toolRegistery";
-import {getToolDefinitions} from "../tools/getToolDefinitions";
 import { createQuizCard } from "../tools/quiz/quizUtils";
 import { createFileDownloadCard } from "../tools/fileDownload/fileDownloadCard";
 import { registerDownloadRoute } from "../tools/fileDownload/downloadRoute";
+import { getFoundryClient } from "../foundry/foundryClient";
+import { ensureAgent, AGENT_NAME } from "../foundry/setupAgent";
 import {
   loadUserContext,
   formatUserContext,
@@ -23,7 +22,6 @@ import {
 const storage = new LocalStorage();
 
 // In-memory cache for the auto-loaded user context, keyed by conversation.
-// For multi-instance deploys, move this into `storage` instead.
 const userContextCache = new Map<string, UserContext>();
 
 // Load instructions from file on initialization
@@ -32,8 +30,10 @@ function loadInstructions(): string {
   return fs.readFileSync(instructionsFilePath, 'utf-8').trim();
 }
 
-// Load instructions once at startup
 const instructions = loadInstructions();
+
+// Agent readiness promise — resolves once the Foundry agent version exists
+let agentReady: Promise<any>;
 
 const createTokenFactory = () => {
   return async (scope: string | string[], tenantId?: string): Promise<string> => {
@@ -67,6 +67,14 @@ const app = new App({
 // bot has generated via the fileDownload tools.
 registerDownloadRoute(app);
 
+// Ensure the Foundry agent version is created on startup
+agentReady = ensureAgent().catch((err) => {
+  console.error("[Foundry] Failed to create agent on startup:", err);
+});
+
+// Map of tool names to their execute functions for quick lookup
+const toolsByName = new Map(tools.map((t) => [t.name, t]));
+
 // Handle incoming messages
 app.on('message', async ({ send, stream, activity }) => {
 
@@ -99,112 +107,133 @@ app.on('message', async ({ send, stream, activity }) => {
     return;
   }
 
-  //Get conversation history
+  // --- Main message handling via Foundry Responses API ---
   const conversationKey = `${activity.conversation.id}/${activity.from.id}`;
-  const messages = storage.get(conversationKey) || [];
 
   // Auto-load the current user's Flowcase profile once per conversation
-  // and inject it into the system prompt. This avoids relying on the
-  // model to decide to call a lookup tool.
   let userCtx = userContextCache.get(conversationKey);
   if (!userCtx) {
     const fresh = await loadUserContext();
     if (fresh) {
       userCtx = fresh;
       userContextCache.set(conversationKey, fresh);
-      console.log("Loaded user context for conversation", conversationKey, {
-        ...fresh,
-        // Don't log the default CV id, as it may be sensitive.
-        default_cv_id: fresh.default_cv_id ? "(present)" : "(missing)"
-       });
+      console.log("Loaded user context for conversation", conversationKey);
     } else {
       console.warn("Failed to load user context for conversation", conversationKey);
     }
   }
+
   const augmentedInstructions = userCtx
     ? `${instructions}\n\n${formatUserContext(userCtx)}`
     : instructions;
 
   try {
-    const prompt = new ChatPrompt({
-      messages,
-      instructions: augmentedInstructions,
-      model: new OpenAIChatModel({
-        model: config.azureOpenAIDeploymentName,
-        apiKey: config.azureOpenAIKey,
-        endpoint: config.azureOpenAIEndpoint,
-        apiVersion: "2024-10-21"
-      })
-    });
+    await agentReady;
 
-    // Register tools with the prompt. The SDK handles the tool-call loop
-    // automatically (autoFunctionCalling defaults to true): when the model
-    // emits a tool call, the matching handler is invoked, its result is fed
-    // back into the conversation, and the model is called again until it
-    // returns a normal text response.
-    const toolDefinitions = getToolDefinitions(tools);
-    const toolsByName = new Map(tools.map((t) => [t.name, t]));
+    const foundryClient = getFoundryClient();
+    const openai = foundryClient.getOpenAIClient() as any;
 
-    for (const def of toolDefinitions) {
-      const tool = toolsByName.get(def.function.name);
-      if (!tool) continue;
+    // Get or create a Foundry conversation for this Teams conversation.
+    // Foundry manages the conversation history for us.
+    let foundryConversationId = storage.get(`foundry:${conversationKey}`);
+    if (!foundryConversationId) {
+      const conversation = await openai.conversations.create();
+      foundryConversationId = conversation.id;
+      storage.set(`foundry:${conversationKey}`, foundryConversationId);
+    }
 
-      prompt.function(
-        def.function.name,
-        def.function.description,
-        def.function.parameters as any,
-        async (args: any) => {
-          console.log(`[tool] ${def.function.name}`, args);
-          const result = await tool.execute(args);
-          console.log(`[tool] ${def.function.name} →`, result);
+    // Send user message to Foundry
+    let response = await openai.responses.create(
+      {
+        conversation: foundryConversationId,
+        input: activity.text,
+        instructions: augmentedInstructions,
+      },
+      {
+        body: {
+          agent_reference: { name: AGENT_NAME, type: "agent_reference" },
+        },
+      }
+    );
 
-          // If the tool produced a quiz, render it as an Adaptive Card so the
-          // user gets the interactive card alongside the model's text reply.
-          if (result && result.type === "quiz") {
-            const card = createQuizCard(result.questions);
-            await send({
-              type: "message",
-              attachments: [CardFactory.adaptiveCard(card)]
-            });
-          }
+    // Tool call loop: handle function_call items from the model.
+    // Built-in tools (web_search, work_iq, etc.) are resolved server-side
+    // by Foundry. Only custom function tools arrive here for local execution.
+    while (response.output.some((item: any) => item.type === "function_call")) {
+      const toolOutputs: any[] = [];
 
-          // If the tool produced a downloadable file, render a card with
-          // a download button pointing at our /download/:id route.
-          if (result && result.type === "fileDownload") {
-            const card = createFileDownloadCard({
-              filename: result.filename,
-              downloadUrl: result.downloadUrl,
-              description: result.cardDescription ?? result.description,
-              previewBody: result.previewBody
-            });
-            await send({
-              type: "message",
-              attachments: [CardFactory.adaptiveCard(card)]
-            });
-          }
+      for (const item of response.output) {
+        if (item.type !== "function_call") continue;
 
-          // Return a string the model can incorporate into its final answer.
-          return JSON.stringify(result);
+        const toolName = item.name;
+        const toolArgs = JSON.parse(item.arguments);
+        const tool = toolsByName.get(toolName);
+
+        if (!tool) {
+          toolOutputs.push({
+            type: "function_call_output",
+            call_id: item.call_id,
+            output: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
+          });
+          continue;
+        }
+
+        console.log(`[tool] ${toolName}`, toolArgs);
+        const result = await tool.execute(toolArgs);
+        console.log(`[tool] ${toolName} →`, result);
+
+        // If the tool produced a quiz, render it as an Adaptive Card
+        if (result && result.type === "quiz") {
+          const card = createQuizCard(result.questions);
+          await send({
+            type: "message",
+            attachments: [CardFactory.adaptiveCard(card)]
+          });
+        }
+
+        // If the tool produced a downloadable file, render a download card
+        if (result && result.type === "fileDownload") {
+          const card = createFileDownloadCard({
+            filename: result.filename,
+            downloadUrl: result.downloadUrl,
+            description: result.cardDescription ?? result.description,
+            previewBody: result.previewBody
+          });
+          await send({
+            type: "message",
+            attachments: [CardFactory.adaptiveCard(card)]
+          });
+        }
+
+        toolOutputs.push({
+          type: "function_call_output",
+          call_id: item.call_id,
+          output: JSON.stringify(result),
+        });
+      }
+
+      // Submit tool results back to Foundry and get the next response
+      response = await openai.responses.create(
+        {
+          conversation: foundryConversationId,
+          input: toolOutputs,
+        },
+        {
+          body: {
+            agent_reference: { name: AGENT_NAME, type: "agent_reference" },
+          },
         }
       );
     }
 
-    if (activity.conversation.isGroup) {
-      // If the conversation is a group chat, we need to send the final response
-      // back to the group chat
-      const response = await prompt.send(activity.text);
-      const responseActivity = new MessageActivity(response.content).addAiGenerated().addFeedback();
-      await send(responseActivity);
-    } else {
-        await prompt.send(activity.text, {
-          onChunk: (chunk) => {
-            stream.emit(chunk);
-          },
-        });
-      // We wrap the final response with an AI Generated indicator
-      stream.emit(new MessageActivity().addAiGenerated().addFeedback());
-    }
-    storage.set(conversationKey, messages);
+    // Extract the final text response
+    const textOutput = response.output_text
+      || "I couldn't generate a response.";
+
+    const responseActivity = new MessageActivity(textOutput)
+      .addAiGenerated()
+      .addFeedback();
+    await send(responseActivity);
   } catch (error) {
     console.error(error);
     await send("The agent encountered an error or bug.");
@@ -213,7 +242,6 @@ app.on('message', async ({ send, stream, activity }) => {
 });
 
 app.on('message.submit.feedback', async ({ activity }) => {
-  //add custom feedback process logic here
   console.log("Your feedback is " + JSON.stringify(activity.value));
 })
 
