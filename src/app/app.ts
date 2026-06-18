@@ -142,12 +142,27 @@ app.on('message', async ({ send, stream, activity }) => {
       storage.set(`foundry:${conversationKey}`, foundryConversationId);
     }
 
+    // Build input: prepend user context as a system-like developer message
+    // (instructions can't be passed per-request when using agent_reference)
+    const inputItems: any[] = [];
+    if (userCtx) {
+      inputItems.push({
+        type: "message",
+        role: "developer",
+        content: augmentedInstructions,
+      });
+    }
+    inputItems.push({
+      type: "message",
+      role: "user",
+      content: activity.text,
+    });
+
     // Send user message to Foundry
     let response = await openai.responses.create(
       {
         conversation: foundryConversationId,
-        input: activity.text,
-        instructions: augmentedInstructions,
+        input: inputItems,
       },
       {
         body: {

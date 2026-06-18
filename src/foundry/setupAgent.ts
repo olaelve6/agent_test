@@ -2,8 +2,15 @@ import { getFoundryClient } from "./foundryClient";
 import config from "../config";
 import { tools } from "../tools/toolRegistery";
 import { getToolDefinitions } from "../tools/getToolDefinitions";
+import * as fs from "fs";
+import * as path from "path";
 
 const AGENT_NAME = "atea-assistant";
+
+function loadInstructions(): string {
+  const instructionsFilePath = path.join(__dirname, "..", "app", "instructions.txt");
+  return fs.readFileSync(instructionsFilePath, "utf-8").trim();
+}
 
 /**
  * Creates (or updates) the agent version in Foundry with both built-in
@@ -47,7 +54,7 @@ export async function ensureAgent() {
   const agent = await client.agents.createVersion(AGENT_NAME, {
     kind: "prompt",
     model: config.foundryModelName!,
-    instructions: "", // Overridden per-request with user context
+    instructions: loadInstructions(),
     tools: foundryTools,
   });
 
