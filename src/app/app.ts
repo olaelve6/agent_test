@@ -64,21 +64,19 @@ const app = new App({
 });
 
 // --- Proactive messaging ---
-// Store conversation references so we can message users later.
+// Store conversation IDs so we can message users later.
 // In production, persist this to a database.
-const conversationReferences = new Map<string, any>();
+const conversationRefs = new Map<string, string>(); // userId -> conversationId
 
-/** Send a proactive message to a user by their stored reference */
+/** Send a proactive message to a user by their stored conversation ID */
 export async function sendProactiveMessage(userId: string, message: string) {
-  const ref = conversationReferences.get(userId);
-  if (!ref) {
-    console.warn(`[proactive] No conversation reference for user: ${userId}`);
+  const conversationId = conversationRefs.get(userId);
+  if (!conversationId) {
+    console.warn(`[proactive] No conversation ID for user: ${userId}`);
     return false;
   }
   try {
-    await (app as any).adapter.continueConversation(ref, async (context: any) => {
-      await context.sendActivity(message);
-    });
+    await app.send(conversationId, { type: "message", text: message });
     console.log(`[proactive] Sent message to ${userId}`);
     return true;
   } catch (err) {
@@ -91,17 +89,50 @@ export async function sendProactiveMessage(userId: string, message: string) {
 // bot has generated via the fileDownload tools.
 registerDownloadRoute(app);
 
-// Register a test endpoint to trigger a proactive message:
-// GET /proactive?message=Hello!
-(app as any).adapter?.router?.get("/proactive", async (req: any, res: any) => {
-  const message = req.query?.message || "👋 This is a proactive test message from your agent!";
-  let sent = 0;
-  for (const [userId] of conversationReferences) {
-    const success = await sendProactiveMessage(userId, message);
-    if (success) sent++;
+/** Ask the Foundry agent to generate a proactive message (not static!) */
+async function generateProactiveMessage(userId: string): Promise<string> {
+  const topics = [
+    "a fun tech fact", "a productivity tip", "a random joke", 
+    "a motivational quote from a famous person", "a fun question to ask the user",
+    "a weird historical fact", "a coding tip", "a wellness reminder",
+    "an interesting science fact", "a creative writing prompt"
+  ];
+  const topic = topics[Math.floor(Math.random() * topics.length)];
+  try {
+    const openai = (getFoundryClient() as any).getOpenAIClient();
+    const response = await openai.responses.create({
+      model: config.foundryModelName,
+      temperature: 1.3,
+      instructions: `You are a friendly assistant sending a short proactive message. Today's topic: ${topic}. Keep it to 1-2 sentences. Be creative, surprising, and DIFFERENT every time. Never start with "Hey there". Write in norwegian`,
+      input: `Generate a brief message about: ${topic}. Be unique and surprising.`,
+    });
+    return response.output_text || "👋 Just checking in!";
+  } catch (err) {
+    console.error("[proactive] Failed to generate message:", err);
+    return "👋 Hey! I'm here if you need anything.";
   }
-  res.status(200).json({ sent, total: conversationReferences.size });
-});
+}
+
+// --- Timer: send a proactive message every 60 seconds (for testing) ---
+let proactiveTimerStarted = false;
+function startProactiveTimer() {
+  if (proactiveTimerStarted) return;
+  proactiveTimerStarted = true;
+  console.log("[proactive] Timer started — will message all users every 60s");
+
+  setInterval(async () => {
+    if (conversationRefs.size === 0) {
+      console.log("[proactive] No users to message yet (send a message to the bot first)");
+      return;
+    }
+    for (const [userId] of conversationRefs) {
+      // Agent generates a unique message each time
+      const message = await generateProactiveMessage(userId);
+      console.log(`[proactive] Sending to ${userId}: ${message}`);
+      await sendProactiveMessage(userId, message);
+    }
+  }, 10_000); // every 60 seconds
+}
 
 // Ensure the Foundry agent version is created on startup
 agentReady = ensureAgent().catch((err) => {
@@ -114,15 +145,12 @@ const toolsByName = new Map(tools.map((t) => [t.name, t]));
 // Handle incoming messages
 app.on('message', async ({ send, stream, activity }) => {
 
-  // Save conversation reference for proactive messaging
-  if (activity.from && activity.conversation && activity.serviceUrl) {
-    conversationReferences.set(activity.from.id, {
-      bot: activity.recipient,
-      conversation: activity.conversation,
-      serviceUrl: activity.serviceUrl,
-      user: activity.from,
-    });
-    console.log(`[proactive] Stored reference for user: ${activity.from.name || activity.from.id}`);
+  // Save conversation ID for proactive messaging
+  if (activity.from && activity.conversation) {
+    conversationRefs.set(activity.from.id, activity.conversation.id);
+    console.log(`[proactive] Stored conversation for user: ${activity.from.name || activity.from.id}`);
+    // Start the proactive timer once we have at least one user
+    startProactiveTimer();
   }
 
   // Adaptive Card submit: grade the quiz answers and reply with results.

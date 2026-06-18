@@ -28,7 +28,7 @@ export async function ensureAgent() {
   // --- Built-in Foundry tools ---
   foundryTools.push({ type: "web_search_preview" });
   // Uncomment to enable:
-  // foundryTools.push({ type: "code_interpreter" });
+  foundryTools.push({ type: "code_interpreter" });
   // foundryTools.push({ type: "file_search" });
 
   // Work IQ (optional — requires M365 Copilot license per user)
