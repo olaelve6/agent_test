@@ -63,9 +63,45 @@ const app = new App({
   storage
 });
 
+// --- Proactive messaging ---
+// Store conversation references so we can message users later.
+// In production, persist this to a database.
+const conversationReferences = new Map<string, any>();
+
+/** Send a proactive message to a user by their stored reference */
+export async function sendProactiveMessage(userId: string, message: string) {
+  const ref = conversationReferences.get(userId);
+  if (!ref) {
+    console.warn(`[proactive] No conversation reference for user: ${userId}`);
+    return false;
+  }
+  try {
+    await (app as any).adapter.continueConversation(ref, async (context: any) => {
+      await context.sendActivity(message);
+    });
+    console.log(`[proactive] Sent message to ${userId}`);
+    return true;
+  } catch (err) {
+    console.error(`[proactive] Failed to send to ${userId}:`, err);
+    return false;
+  }
+}
+
 // Register the GET /download/:id route so the user can fetch files the
 // bot has generated via the fileDownload tools.
 registerDownloadRoute(app);
+
+// Register a test endpoint to trigger a proactive message:
+// GET /proactive?message=Hello!
+(app as any).adapter?.router?.get("/proactive", async (req: any, res: any) => {
+  const message = req.query?.message || "👋 This is a proactive test message from your agent!";
+  let sent = 0;
+  for (const [userId] of conversationReferences) {
+    const success = await sendProactiveMessage(userId, message);
+    if (success) sent++;
+  }
+  res.status(200).json({ sent, total: conversationReferences.size });
+});
 
 // Ensure the Foundry agent version is created on startup
 agentReady = ensureAgent().catch((err) => {
@@ -77,6 +113,17 @@ const toolsByName = new Map(tools.map((t) => [t.name, t]));
 
 // Handle incoming messages
 app.on('message', async ({ send, stream, activity }) => {
+
+  // Save conversation reference for proactive messaging
+  if (activity.from && activity.conversation && activity.serviceUrl) {
+    conversationReferences.set(activity.from.id, {
+      bot: activity.recipient,
+      conversation: activity.conversation,
+      serviceUrl: activity.serviceUrl,
+      user: activity.from,
+    });
+    console.log(`[proactive] Stored reference for user: ${activity.from.name || activity.from.id}`);
+  }
 
   // Adaptive Card submit: grade the quiz answers and reply with results.
   if (activity.value && Array.isArray((activity.value as any).quizAnswerKey)) {
