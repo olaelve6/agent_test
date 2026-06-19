@@ -1,6 +1,6 @@
 import { getFoundryClient } from "./foundryClient";
 import config from "../config";
-import { tools } from "../tools/toolRegistery";
+import { tools } from "../tools/toolRegistry";
 import { getToolDefinitions } from "../tools/getToolDefinitions";
 import * as fs from "fs";
 import * as path from "path";

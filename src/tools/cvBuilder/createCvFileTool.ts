@@ -1,7 +1,7 @@
 import Ajv from "ajv"; // 1. Import Ajv
 import config from "../../config";
 import { Tool, ToolParameters } from "../types";
-import { putFile } from "../fileDownload/fileStore";
+import { putFile } from "./fileDownload/fileStore";
 import { CvEntries, cvEntriesSchema } from "./getCvSchema";
 import { buildCvPreviewBody } from "./cvPreview";
 

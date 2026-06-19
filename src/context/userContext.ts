@@ -12,6 +12,9 @@ import { FlowcaseUser } from "../tools/flowcase/types";
 
 // TODO: derive from `activity.from` (e.g. aadObjectId -> email via Graph)
 // once we wire real Teams identity through.
+
+// Also fetch the user's current CV from Flowcase and inject that as well.
+
 const HARDCODED_USER_EMAIL = "ola.johannes.elvedahl@atea.no";
 
 export type UserContext = {
