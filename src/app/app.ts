@@ -118,7 +118,7 @@ let proactiveTimerStarted = false;
 function startProactiveTimer() {
   if (proactiveTimerStarted) return;
   proactiveTimerStarted = true;
-  console.log("[proactive] Timer started — will message all users every 60s");
+  console.log("[proactive] Timer started — will message all users every 30s");
 
   setInterval(async () => {
     if (conversationRefs.size === 0) {
@@ -131,7 +131,7 @@ function startProactiveTimer() {
       console.log(`[proactive] Sending to ${userId}: ${message}`);
       await sendProactiveMessage(userId, message);
     }
-  }, 10_000); // every 60 seconds
+  }, 30_000); // every 30 seconds
 }
 
 // Ensure the Foundry agent version is created on startup
