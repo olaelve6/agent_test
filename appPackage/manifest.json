@@ -14,12 +14,12 @@
         "outline": "outline.png"
     },
     "name": {
-        "short": "test${{APP_NAME_SUFFIX}}",
-        "full": "full name for test"
+        "short": "Atea Assistant",
+        "full": "Atea AI Assistant"
     },
     "description": {
-        "short": "short description for test",
-        "full": "full description for test"
+        "short": "Your Atea work assistant",
+        "full": "AI assistant for Atea employees — CV management, Flowcase lookup, quizzes, and more."
     },
     "accentColor": "#FFFFFF",
     "supportsChannelFeatures": "tier1",
